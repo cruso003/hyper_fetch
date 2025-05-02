@@ -26,7 +26,7 @@ This project is a Rust-based API using Actix Web to scrape data from YouTube and
 
    ```bash
    git clone https://github.com/cruso003/hyper_fetch
-   cd hyper-fetch-api
+   cd hyper_fetch
    ```
 
 2. **Install Dependencies**:
