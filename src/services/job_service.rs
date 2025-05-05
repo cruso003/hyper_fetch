@@ -108,96 +108,82 @@ pub async fn handle_job_scraper(
 
 // Main RemoteOK job fetch function 
 async fn fetch_remoteok_jobs(
-    query: &str, 
+    query: &str,
     limit: u32,
-    job_type: Option<&str>
+    job_type: Option<&str>,
 ) -> Result<Vec<Job>, Box<dyn Error>> {
     let api_url = "https://remoteok.io/api";
-    
+
     let client = reqwest::Client::builder()
         .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
         .timeout(Duration::from_secs(10))
         .build()?;
-    
-    let response = client
-        .get(api_url)
-        .send()
-        .await?;
-    
+
+    let response = client.get(api_url).send().await?;
+
     if !response.status().is_success() {
         return Err(format!("RemoteOK API request failed with status: {}", response.status()).into());
     }
-    
+
     let jobs_data: Vec<serde_json::Value> = response.json().await?;
     let query_lower = query.to_lowercase();
-    
+    let query_parts: Vec<&str> = query_lower.split_whitespace().collect();
+
     let mut jobs = Vec::new();
-    for job in jobs_data.iter().skip(1) { // Skip first item (it's metadata)
-        // Only include jobs that match our search query
-        let position = job.get("position")
+    for job in jobs_data.iter().skip(1) {
+        let position = job
+            .get("position")
             .and_then(|p| p.as_str())
             .unwrap_or("")
             .to_lowercase();
-            
-        let tags = job.get("tags")
-            .and_then(|t| t.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|tag| tag.as_str())
-                    .collect::<Vec<&str>>()
-                    .join(" ")
-                    .to_lowercase()
-            })
-            .unwrap_or_default();
-            
-        // Check if job matches our query
-        if !position.contains(&query_lower) && !tags.contains(&query_lower) {
+
+        // Stricter matching: Check if the position contains all parts of the query
+        let position_matches = query_parts.iter().all(|part| position.contains(part));
+        if !position_matches {
             continue;
         }
-        
-        // Determine job type from tags and description
+
+        // Apply job_type filter
         let determined_job_type = determine_job_type(job);
-        
-        // Skip if job type filter specified and doesn't match
         if let Some(jt) = job_type {
             let jt_lower = jt.to_lowercase();
-            
-            // Check job type - be more flexible with matching
             let type_matches = determined_job_type.as_ref().map_or(false, |t| {
                 t.to_lowercase().contains(&jt_lower) ||
                 (jt_lower == "full-time" && t.to_lowercase().contains("full")) ||
                 (jt_lower == "part-time" && t.to_lowercase().contains("part")) ||
-                (jt_lower == "contract" && (t.to_lowercase().contains("contract") || 
-                                           t.to_lowercase().contains("freelance")))
+                (jt_lower == "contract" && (t.to_lowercase().contains("contract") || t.to_lowercase().contains("freelance")))
             });
-            
             if !type_matches {
                 continue;
             }
         }
-        
-        let id = job.get("id")
+
+        let id = job
+            .get("id")
             .and_then(|i| i.as_str())
             .unwrap_or(&format!("remoteok_{}", jobs.len()))
             .to_string();
-            
-        let title = job.get("position")
+
+        let title = job
+            .get("position")
             .and_then(|p| p.as_str())
             .unwrap_or("")
             .to_string();
-            
-        let company = job.get("company")
+
+        let company = job
+            .get("company")
             .and_then(|c| c.as_str())
             .unwrap_or("")
             .to_string();
-            
-        let description = job.get("description")
+
+        let description = job
+            .get("description")
             .and_then(|d| d.as_str())
             .unwrap_or("")
             .to_string();
-            
-        // Fix the URL issue
-        let apply_url = job.get("url")
+
+        let apply_url = job
+            .get("url")
             .and_then(|u| u.as_str())
             .map(|u| {
                 if u.starts_with("http") {
@@ -207,19 +193,20 @@ async fn fetch_remoteok_jobs(
                 }
             })
             .unwrap_or_default();
-            
-        let date_posted = job.get("date")
+
+        let date_posted = job
+            .get("date")
             .and_then(|d| d.as_str())
             .map(|d| d.to_string());
-            
-        // Parse salary if available
-        let (salary_min, salary_max) = job.get("salary")
+
+        let (salary_min, salary_max) = job
+            .get("salary")
             .and_then(|s| s.as_str())
             .map(|s| parse_salary(s))
             .unwrap_or((None, None));
-        
-        // Get company logo if available
-        let logo = job.get("logo")
+
+        let logo = job
+            .get("logo")
             .and_then(|l| l.as_str())
             .map(|l| {
                 if l.starts_with("http") {
@@ -228,7 +215,7 @@ async fn fetch_remoteok_jobs(
                     format!("https://remoteok.com/assets/img/jobs/{}", l)
                 }
             });
-            
+
         jobs.push(Job {
             id,
             title,
@@ -243,128 +230,112 @@ async fn fetch_remoteok_jobs(
             job_type: determined_job_type,
             employer_logo: logo,
         });
-        
+
         if jobs.len() >= limit as usize {
             break;
         }
     }
-    
+
     Ok(jobs)
 }
 
-// Find RemoteOK jobs that might be relevant to a specific location
 async fn fetch_remoteok_jobs_with_location(
-    query: &str, 
+    query: &str,
     limit: u32,
     location: &str,
-    job_type: Option<&str>
+    job_type: Option<&str>,
 ) -> Result<Vec<Job>, Box<dyn Error>> {
     let api_url = "https://remoteok.io/api";
-    
+
     let client = reqwest::Client::builder()
         .user_agent("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
         .timeout(Duration::from_secs(10))
         .build()?;
-    
-    let response = client
-        .get(api_url)
-        .send()
-        .await?;
-    
+
+    let response = client.get(api_url).send().await?;
+
     if !response.status().is_success() {
         return Err(format!("RemoteOK API request failed with status: {}", response.status()).into());
     }
-    
+
     let jobs_data: Vec<serde_json::Value> = response.json().await?;
     let query_lower = query.to_lowercase();
+    let query_parts: Vec<&str> = query_lower.split_whitespace().collect();
     let location_lower = location.to_lowercase();
-    
-    // Get city and region/state components for better matching
     let location_parts: Vec<&str> = location_lower.split(',').map(|s| s.trim()).collect();
     let city = location_parts.first().copied().unwrap_or(&location_lower);
-    
+
     let mut jobs = Vec::new();
-    for job in jobs_data.iter().skip(1) { // Skip first item (it's metadata)
-        // Check if job matches both query and location
-        let position = job.get("position")
+    for job in jobs_data.iter().skip(1) {
+        let position = job
+            .get("position")
             .and_then(|p| p.as_str())
             .unwrap_or("")
             .to_lowercase();
-            
-        let description = job.get("description")
+
+        // Stricter matching: Check if the position contains all parts of the query
+        let position_matches = query_parts.iter().all(|part| position.contains(part));
+        if !position_matches {
+            continue;
+        }
+
+        // Check if the job mentions the location
+        let description = job
+            .get("description")
             .and_then(|d| d.as_str())
             .unwrap_or("")
             .to_lowercase();
-            
-        let tags = job.get("tags")
-            .and_then(|t| t.as_array())
-            .map(|arr| {
-                arr.iter()
-                    .filter_map(|tag| tag.as_str())
-                    .collect::<Vec<&str>>()
-                    .join(" ")
-                    .to_lowercase()
-            })
-            .unwrap_or_default();
-            
-        // First check if it matches our query
-        if !position.contains(&query_lower) && !tags.contains(&query_lower) {
-            continue;
-        }
-        
-        // Then check if it mentions our location
-        let location_mentioned = description.contains(city) || 
+
+        let location_mentioned = description.contains(city) ||
                                description.contains(&location_lower) ||
                                position.contains(city) ||
                                position.contains(&location_lower);
-                               
+
         if !location_mentioned {
             continue;
         }
-        
-        // Check job type if specified
+
+        // Apply job_type filter
         let determined_job_type = determine_job_type(job);
-        
         if let Some(jt) = job_type {
             let jt_lower = jt.to_lowercase();
-            
-            // Check job type - be more flexible with matching
             let type_matches = determined_job_type.as_ref().map_or(false, |t| {
                 t.to_lowercase().contains(&jt_lower) ||
                 (jt_lower == "full-time" && t.to_lowercase().contains("full")) ||
                 (jt_lower == "part-time" && t.to_lowercase().contains("part")) ||
-                (jt_lower == "contract" && (t.to_lowercase().contains("contract") || 
-                                           t.to_lowercase().contains("freelance")))
+                (jt_lower == "contract" && (t.to_lowercase().contains("contract") || t.to_lowercase().contains("freelance")))
             });
-            
             if !type_matches {
                 continue;
             }
         }
-        
-        // If we got here, the job matches our criteria
-        let id = job.get("id")
+
+        let id = job
+            .get("id")
             .and_then(|i| i.as_str())
             .unwrap_or(&format!("remoteok_loc_{}", jobs.len()))
             .to_string();
-            
-        let title = job.get("position")
+
+        let title = job
+            .get("position")
             .and_then(|p| p.as_str())
             .unwrap_or("")
             .to_string();
-            
-        let company = job.get("company")
+
+        let company = job
+            .get("company")
             .and_then(|c| c.as_str())
             .unwrap_or("")
             .to_string();
-            
-        let job_description = job.get("description")
+
+        let job_description = job
+            .get("description")
             .and_then(|d| d.as_str())
             .unwrap_or("")
             .to_string();
-            
-        // Fix the URL issue
-        let apply_url = job.get("url")
+
+        let apply_url = job
+            .get("url")
             .and_then(|u| u.as_str())
             .map(|u| {
                 if u.starts_with("http") {
@@ -374,19 +345,20 @@ async fn fetch_remoteok_jobs_with_location(
                 }
             })
             .unwrap_or_default();
-            
-        let date_posted = job.get("date")
+
+        let date_posted = job
+            .get("date")
             .and_then(|d| d.as_str())
             .map(|d| d.to_string());
-            
-        // Parse salary if available
-        let (salary_min, salary_max) = job.get("salary")
+
+        let (salary_min, salary_max) = job
+            .get("salary")
             .and_then(|s| s.as_str())
             .map(|s| parse_salary(s))
             .unwrap_or((None, None));
-        
-        // Get company logo if available
-        let logo = job.get("logo")
+
+        let logo = job
+            .get("logo")
             .and_then(|l| l.as_str())
             .map(|l| {
                 if l.starts_with("http") {
@@ -395,12 +367,12 @@ async fn fetch_remoteok_jobs_with_location(
                     format!("https://remoteok.com/assets/img/jobs/{}", l)
                 }
             });
-            
+
         jobs.push(Job {
             id,
             title,
             employer_name: company,
-            location: format!("{} (Remote)", location), // Indicate both location and remote status
+            location: format!("{} (Remote)", location),
             description: job_description,
             apply_url,
             salary_min,
@@ -410,12 +382,12 @@ async fn fetch_remoteok_jobs_with_location(
             job_type: determined_job_type,
             employer_logo: logo,
         });
-        
+
         if jobs.len() >= limit as usize {
             break;
         }
     }
-    
+
     Ok(jobs)
 }
 
